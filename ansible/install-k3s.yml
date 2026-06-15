@@ -1,0 +1,176 @@
+---
+- name: Prepare nodes for K3s installation
+  hosts: k3s_cluster
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Ensure each VM owns its configured node IP
+      ansible.builtin.assert:
+        that:
+          - k3s_node_ip in ansible_all_ipv4_addresses
+        fail_msg: "{{ inventory_hostname }} does not have {{ k3s_node_ip }}. Current IPs: {{ ansible_all_ipv4_addresses }}"
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - ca-certificates
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Enable NTP synchronization when available
+      ansible.builtin.command: timedatectl set-ntp true
+      changed_when: false
+      failed_when: false
+
+    - name: Reset existing K3s server when requested
+      ansible.builtin.command: /usr/local/bin/k3s-uninstall.sh
+      when:
+        - k3s_reset_cluster | bool
+        - inventory_hostname in groups['k3s_master']
+      changed_when: true
+      failed_when: false
+
+    - name: Reset existing K3s agent when requested
+      ansible.builtin.command: /usr/local/bin/k3s-agent-uninstall.sh
+      when:
+        - k3s_reset_cluster | bool
+        - inventory_hostname in groups['k3s_workers']
+      changed_when: true
+      failed_when: false
+
+- name: Install K3s server
+  hosts: k3s_master
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Check whether K3s server is already installed
+      ansible.builtin.stat:
+        path: /etc/systemd/system/k3s.service
+      register: k3s_server_service
+
+    - name: Install K3s server
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_EXEC="server --node-ip={{ k3s_node_ip }} --tls-san={{ k3s_master_ip }} --write-kubeconfig-mode=644{% for component in k3s_disable_components %} --disable {{ component }}{% endfor %}" \
+        sh -
+      args:
+        executable: /bin/bash
+      when: not k3s_server_service.stat.exists
+      changed_when: true
+
+    - name: Ensure K3s server is started and enabled
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+        enabled: true
+
+    - name: Wait for Kubernetes API
+      ansible.builtin.wait_for:
+        host: "{{ k3s_master_ip }}"
+        port: "{{ k3s_api_port }}"
+        timeout: 180
+
+    - name: Wait until master kubectl can list nodes
+      ansible.builtin.command: k3s kubectl get nodes
+      register: master_kubectl
+      changed_when: false
+      retries: 30
+      delay: 4
+      until: master_kubectl.rc == 0
+
+    - name: Read cluster node token
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_node_token_raw
+
+    - name: Store cluster token for worker installation
+      ansible.builtin.set_fact:
+        k3s_node_token: "{{ k3s_node_token_raw.content | b64decode | trim }}"
+
+    - name: Read kubeconfig from master
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: k3s_kubeconfig_raw
+
+    - name: Write kubeconfig to repository root
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../kubeconfig-k3s-cluster.yaml"
+        mode: "0600"
+        content: "{{ (k3s_kubeconfig_raw.content | b64decode) | replace('https://127.0.0.1:6443', 'https://' ~ k3s_master_ip ~ ':' ~ k3s_api_port) }}"
+      delegate_to: localhost
+      become: false
+
+- name: Install K3s agents
+  hosts: k3s_workers
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Check whether K3s agent is already installed
+      ansible.builtin.stat:
+        path: /etc/systemd/system/k3s-agent.service
+      register: k3s_agent_service
+
+    - name: Install K3s agent
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -sfL https://get.k3s.io | \
+        K3S_URL="https://{{ k3s_master_ip }}:{{ k3s_api_port }}" \
+        K3S_TOKEN="{{ hostvars[groups['k3s_master'][0]].k3s_node_token }}" \
+        INSTALL_K3S_EXEC="agent --node-ip={{ k3s_node_ip }}" \
+        sh -
+      args:
+        executable: /bin/bash
+      when: not k3s_agent_service.stat.exists
+      changed_when: true
+
+    - name: Ensure K3s agent is started and enabled
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: started
+        enabled: true
+
+- name: Validate K3s cluster
+  hosts: k3s_master
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Wait until all nodes are Ready
+      ansible.builtin.command: k3s kubectl wait --for=condition=Ready nodes --all --timeout=180s
+      register: nodes_ready
+      changed_when: false
+      retries: 5
+      delay: 5
+      until: nodes_ready.rc == 0
+
+    - name: Label worker nodes
+      ansible.builtin.command: "k3s kubectl label node {{ item }} node-role.kubernetes.io/worker=true --overwrite"
+      loop: "{{ groups['k3s_workers'] }}"
+      changed_when: true
+
+    - name: Create default namespaces
+      ansible.builtin.command: "k3s kubectl create namespace {{ item }}"
+      loop: "{{ k3s_namespaces }}"
+      register: create_namespace
+      changed_when: create_namespace.rc == 0
+      failed_when:
+        - create_namespace.rc != 0
+        - "'AlreadyExists' not in create_namespace.stderr"
+
+    - name: Show final node status
+      ansible.builtin.command: k3s kubectl get nodes -o wide
+      register: final_nodes
+      changed_when: false
+
+    - name: Show final namespace status
+      ansible.builtin.command: k3s kubectl get namespaces
+      register: final_namespaces
+      changed_when: false
+
+    - name: Print final status
+      ansible.builtin.debug:
+        msg:
+          - "{{ final_nodes.stdout_lines }}"
+          - "{{ final_namespaces.stdout_lines }}"

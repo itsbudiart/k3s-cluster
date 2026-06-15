@@ -1,0 +1,29 @@
+# Vagrant local state
+.vagrant/
+
+# Local kubeconfig and Kubernetes secrets
+kubeconfig-*.yaml
+*.kubeconfig
+*.kubeconfig.yaml
+*-token
+*.token
+
+# Ansible local output
+*.retry
+.ansible/
+ansible/.cache/
+
+# Generated cluster manifests and temporary files
+metallb-config.yaml
+tmp/
+temp/
+*.tmp
+*.log
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/

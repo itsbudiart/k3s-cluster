@@ -1,0 +1,60 @@
+---
+k3s_master_ip: 192.168.56.33
+k3s_api_port: 6443
+k3s_disable_components:
+  - traefik
+  - servicelb
+
+# Set true only when you want to uninstall any existing K3s data before a fresh
+# install. Default false keeps existing clusters safe.
+k3s_reset_cluster: false
+
+k3s_namespaces:
+  - dev
+  - qa
+  - production
+
+helm_install_script_url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+
+metallb_namespace: metallb-system
+metallb_version: v0.15.2
+metallb_manifest_url: "https://raw.githubusercontent.com/metallb/metallb/{{ metallb_version }}/config/manifests/metallb-native.yaml"
+metallb_pool_name: homelab-pool
+metallb_l2_advertisement_name: homelab-l2
+metallb_address_range: 192.168.56.30-192.168.56.32
+
+ingress_nginx_namespace: ingress-nginx
+ingress_nginx_release_name: ingress-nginx
+ingress_nginx_repo_name: ingress-nginx
+ingress_nginx_repo_url: https://kubernetes.github.io/ingress-nginx
+ingress_nginx_chart: ingress-nginx/ingress-nginx
+ingress_nginx_service_name: ingress-nginx-controller
+
+dependency_demo_enabled: true
+dependency_demo_namespace: apps
+dependency_demo_deployment_name: nginx-demo
+dependency_demo_service_name: nginx-demo
+dependency_demo_ingress_name: nginx-demo-ingress
+dependency_demo_image: nginx
+dependency_demo_host: nginx.superapps.lab
+
+argocd_namespace: argocd
+argocd_manifest_url: https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+argocd_service_name: argocd-server
+argocd_service_type: LoadBalancer
+argocd_hostname: argocd.superapps.lab
+argocd_wait_timeout: 300s
+argocd_wait_for_external_ip: true
+argocd_install_cli: false
+
+# Set to true for the same recovery behavior used after IP changes:
+# stop k3s, clean stale containerd/CNI runtime state, then start services again.
+k3s_cleanup_runtime: true
+
+# Delete worker node objects before starting agents so they re-register with
+# the current InternalIP from inventory.
+k3s_reregister_workers: true
+
+# Recycle non-ready pods after the node repair. This clears stale sandboxes left
+# by old runtime state.
+k3s_recycle_non_ready_pods: true

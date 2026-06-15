@@ -1,0 +1,227 @@
+---
+- name: Install Kubernetes cluster dependencies
+  hosts: k3s_master
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Verify Kubernetes API access from the master node
+      ansible.builtin.command: k3s kubectl get nodes
+      register: kubectl_nodes
+      changed_when: false
+      retries: 20
+      delay: 3
+      until: kubectl_nodes.rc == 0
+
+    - name: Check whether Helm is already installed
+      ansible.builtin.command: helm version --short
+      register: helm_version_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Helm
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -fsSL {{ helm_install_script_url }} | bash
+      args:
+        executable: /bin/bash
+      when: helm_version_check.rc != 0
+      changed_when: true
+
+    - name: Show Helm version
+      ansible.builtin.command: helm version --short
+      register: helm_version
+      changed_when: false
+
+    - name: Install MetalLB manifest
+      ansible.builtin.command: "k3s kubectl apply -f {{ metallb_manifest_url }}"
+      register: metallb_apply
+      changed_when: "'created' in metallb_apply.stdout or 'configured' in metallb_apply.stdout"
+
+    - name: Wait for MetalLB controller deployment
+      ansible.builtin.command: "k3s kubectl -n {{ metallb_namespace }} rollout status deployment/controller --timeout=300s"
+      register: metallb_controller_rollout
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: metallb_controller_rollout.rc == 0
+
+    - name: Wait for MetalLB speaker daemonset
+      ansible.builtin.command: "k3s kubectl -n {{ metallb_namespace }} rollout status daemonset/speaker --timeout=300s"
+      register: metallb_speaker_rollout
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: metallb_speaker_rollout.rc == 0
+
+    - name: Configure MetalLB address pool and L2 advertisement
+      ansible.builtin.shell: |
+        set -o pipefail
+        cat <<'EOF' | k3s kubectl apply -f -
+        apiVersion: metallb.io/v1beta1
+        kind: IPAddressPool
+        metadata:
+          name: {{ metallb_pool_name }}
+          namespace: {{ metallb_namespace }}
+        spec:
+          addresses:
+          - {{ metallb_address_range }}
+        ---
+        apiVersion: metallb.io/v1beta1
+        kind: L2Advertisement
+        metadata:
+          name: {{ metallb_l2_advertisement_name }}
+          namespace: {{ metallb_namespace }}
+        EOF
+      args:
+        executable: /bin/bash
+      register: metallb_config_apply
+      changed_when: "'created' in metallb_config_apply.stdout or 'configured' in metallb_config_apply.stdout"
+
+    - name: Add NGINX Ingress Helm repository
+      ansible.builtin.command: "helm repo add {{ ingress_nginx_repo_name }} {{ ingress_nginx_repo_url }}"
+      register: ingress_repo_add
+      changed_when: ingress_repo_add.rc == 0
+      failed_when:
+        - ingress_repo_add.rc != 0
+        - "'already exists' not in ingress_repo_add.stderr"
+
+    - name: Update Helm repositories
+      ansible.builtin.command: helm repo update
+      changed_when: false
+
+    - name: Install or upgrade NGINX Ingress Controller
+      ansible.builtin.command: >
+        helm upgrade --install {{ ingress_nginx_release_name }} {{ ingress_nginx_chart }}
+        --namespace {{ ingress_nginx_namespace }}
+        --create-namespace
+      register: ingress_install
+      changed_when: "'has been upgraded' in ingress_install.stdout or 'has been installed' in ingress_install.stdout"
+
+    - name: Wait for NGINX Ingress Controller rollout
+      ansible.builtin.command: "k3s kubectl -n {{ ingress_nginx_namespace }} rollout status deployment/{{ ingress_nginx_service_name }} --timeout=300s"
+      register: ingress_rollout
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: ingress_rollout.rc == 0
+
+    - name: Wait for NGINX Ingress external IP
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl -n {{ ingress_nginx_namespace }} get svc {{ ingress_nginx_service_name }} \
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+      args:
+        executable: /bin/bash
+      register: ingress_external_ip
+      changed_when: false
+      retries: 60
+      delay: 5
+      until: ingress_external_ip.stdout | length > 0
+
+    - name: Create demo namespace
+      ansible.builtin.command: "k3s kubectl create namespace {{ dependency_demo_namespace }}"
+      when: dependency_demo_enabled | bool
+      register: demo_namespace
+      changed_when: demo_namespace.rc == 0
+      failed_when:
+        - demo_namespace.rc != 0
+        - "'AlreadyExists' not in demo_namespace.stderr"
+
+    - name: Apply demo NGINX deployment
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl create deployment {{ dependency_demo_deployment_name }} \
+          --image={{ dependency_demo_image }} \
+          -n {{ dependency_demo_namespace }} \
+          --dry-run=client -o yaml | k3s kubectl apply -f -
+      args:
+        executable: /bin/bash
+      when: dependency_demo_enabled | bool
+      register: demo_deployment
+      changed_when: "'created' in demo_deployment.stdout or 'configured' in demo_deployment.stdout"
+
+    - name: Apply demo NGINX service
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl expose deployment {{ dependency_demo_deployment_name }} \
+          --port=80 \
+          -n {{ dependency_demo_namespace }} \
+          --dry-run=client -o yaml | k3s kubectl apply -f -
+      args:
+        executable: /bin/bash
+      when: dependency_demo_enabled | bool
+      register: demo_service
+      changed_when: "'created' in demo_service.stdout or 'configured' in demo_service.stdout"
+
+    - name: Apply demo NGINX ingress
+      ansible.builtin.shell: |
+        set -o pipefail
+        cat <<'EOF' | k3s kubectl apply -f -
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: {{ dependency_demo_ingress_name }}
+          namespace: {{ dependency_demo_namespace }}
+        spec:
+          ingressClassName: nginx
+          rules:
+          - host: {{ dependency_demo_host }}
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: {{ dependency_demo_service_name }}
+                    port:
+                      number: 80
+        EOF
+      args:
+        executable: /bin/bash
+      when: dependency_demo_enabled | bool
+      register: demo_ingress
+      changed_when: "'created' in demo_ingress.stdout or 'configured' in demo_ingress.stdout"
+
+    - name: Wait for demo NGINX deployment
+      ansible.builtin.command: "k3s kubectl -n {{ dependency_demo_namespace }} rollout status deployment/{{ dependency_demo_deployment_name }} --timeout=180s"
+      when: dependency_demo_enabled | bool
+      register: demo_rollout
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: demo_rollout.rc == 0
+
+    - name: Show dependency status
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "Helm:"
+        helm version --short
+        echo
+        echo "MetalLB pods:"
+        k3s kubectl get pods -n {{ metallb_namespace }} -o wide
+        echo
+        echo "MetalLB IP pools:"
+        k3s kubectl get ipaddresspools -n {{ metallb_namespace }}
+        echo
+        echo "NGINX Ingress pods:"
+        k3s kubectl get pods -n {{ ingress_nginx_namespace }} -o wide
+        echo
+        echo "NGINX Ingress services:"
+        k3s kubectl get svc -n {{ ingress_nginx_namespace }} -o wide
+        {% if dependency_demo_enabled | bool %}
+        echo
+        echo "Demo app:"
+        k3s kubectl get all,ingress -n {{ dependency_demo_namespace }} -o wide
+        {% endif %}
+      args:
+        executable: /bin/bash
+      register: dependency_status
+      changed_when: false
+
+    - name: Print dependency access details
+      ansible.builtin.debug:
+        msg:
+          - "{{ dependency_status.stdout_lines }}"
+          - "NGINX Ingress external IP: {{ ingress_external_ip.stdout }}"
+          - "Demo URL: http://{{ dependency_demo_host }}"
+          - "Add this entry to your host /etc/hosts if needed: {{ ingress_external_ip.stdout }} {{ dependency_demo_host }}"

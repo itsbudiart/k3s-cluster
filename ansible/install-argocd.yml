@@ -1,0 +1,120 @@
+---
+- name: Install Argo CD on the K3s cluster
+  hosts: k3s_master
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Verify Kubernetes API access from the master node
+      ansible.builtin.command: k3s kubectl get nodes
+      register: kubectl_nodes
+      changed_when: false
+      retries: 20
+      delay: 3
+      until: kubectl_nodes.rc == 0
+
+    - name: Create Argo CD namespace
+      ansible.builtin.command: "k3s kubectl create namespace {{ argocd_namespace }}"
+      register: create_argocd_namespace
+      changed_when: create_argocd_namespace.rc == 0
+      failed_when:
+        - create_argocd_namespace.rc != 0
+        - "'AlreadyExists' not in create_argocd_namespace.stderr"
+
+    - name: Install Argo CD manifests
+      ansible.builtin.command: >
+        k3s kubectl apply --server-side --force-conflicts
+        -n {{ argocd_namespace }}
+        -f {{ argocd_manifest_url }}
+      register: argocd_apply
+      changed_when: "'configured' in argocd_apply.stdout or 'created' in argocd_apply.stdout or 'serverside-applied' in argocd_apply.stdout"
+
+    - name: Wait for Argo CD deployments
+      ansible.builtin.command: "k3s kubectl -n {{ argocd_namespace }} rollout status deployment --all --timeout={{ argocd_wait_timeout }}"
+      register: argocd_deployments
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: argocd_deployments.rc == 0
+
+    - name: Wait for Argo CD statefulsets
+      ansible.builtin.command: "k3s kubectl -n {{ argocd_namespace }} rollout status statefulset --all --timeout={{ argocd_wait_timeout }}"
+      register: argocd_statefulsets
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: argocd_statefulsets.rc == 0
+
+    - name: Expose Argo CD server service
+      ansible.builtin.command: >
+        k3s kubectl patch svc {{ argocd_service_name }}
+        -n {{ argocd_namespace }}
+        -p '{"spec":{"type":"{{ argocd_service_type }}"}}'
+      register: argocd_service_patch
+      changed_when: "'patched' in argocd_service_patch.stdout"
+
+    - name: Wait for Argo CD external IP
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl get svc {{ argocd_service_name }} -n {{ argocd_namespace }} \
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+      args:
+        executable: /bin/bash
+      register: argocd_external_ip
+      changed_when: false
+      retries: 60
+      delay: 5
+      until: argocd_external_ip.stdout | length > 0
+      when:
+        - argocd_service_type == "LoadBalancer"
+        - argocd_wait_for_external_ip | bool
+
+    - name: Read Argo CD initial admin password
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret \
+          -o jsonpath='{.data.password}' | base64 -d
+      args:
+        executable: /bin/bash
+      register: argocd_initial_password
+      changed_when: false
+      failed_when: false
+
+    - name: Check CPU architecture for optional Argo CD CLI installation
+      ansible.builtin.command: dpkg --print-architecture
+      register: dpkg_architecture
+      changed_when: false
+      when: argocd_install_cli | bool
+
+    - name: Set Argo CD CLI architecture
+      ansible.builtin.set_fact:
+        argocd_cli_arch: "{{ 'amd64' if dpkg_architecture.stdout == 'amd64' else 'arm64' }}"
+      when: argocd_install_cli | bool
+
+    - name: Install Argo CD CLI
+      ansible.builtin.get_url:
+        url: "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-{{ argocd_cli_arch }}"
+        dest: /usr/local/bin/argocd
+        owner: root
+        group: root
+        mode: "0755"
+      when: argocd_install_cli | bool
+
+    - name: Show Argo CD pods
+      ansible.builtin.command: "k3s kubectl get pods -n {{ argocd_namespace }} -o wide"
+      register: argocd_pods
+      changed_when: false
+
+    - name: Show Argo CD services
+      ansible.builtin.command: "k3s kubectl get svc -n {{ argocd_namespace }} -o wide"
+      register: argocd_services
+      changed_when: false
+
+    - name: Print Argo CD access details
+      ansible.builtin.debug:
+        msg:
+          - "{{ argocd_pods.stdout_lines }}"
+          - "{{ argocd_services.stdout_lines }}"
+          - "URL: https://{{ (argocd_external_ip.stdout | default('')) if argocd_external_ip is defined else '<service-ip>' }}"
+          - "Hostname: https://{{ argocd_hostname }}"
+          - "Username: admin"
+          - "Initial password: {{ argocd_initial_password.stdout if argocd_initial_password.rc == 0 else 'initial password secret was not found, it may have already been consumed or removed' }}"
