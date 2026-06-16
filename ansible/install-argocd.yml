@@ -44,13 +44,44 @@
       delay: 5
       until: argocd_statefulsets.rc == 0
 
+    - name: Configure Argo CD public URL
+      ansible.builtin.command: >
+        k3s kubectl patch cm argocd-cm
+        -n {{ argocd_namespace }}
+        --type merge
+        -p '{"data":{"url":"{{ argocd_url_scheme }}://{{ argocd_hostname }}"}}'
+      register: argocd_url_config
+      changed_when: "'patched' in argocd_url_config.stdout"
+
+    - name: Configure Argo CD server HTTP mode
+      ansible.builtin.command: >
+        k3s kubectl patch cm argocd-cmd-params-cm
+        -n {{ argocd_namespace }}
+        --type merge
+        -p '{"data":{"server.insecure":"{{ argocd_server_insecure | bool | lower }}"}}'
+      register: argocd_server_mode
+      changed_when: "'patched' in argocd_server_mode.stdout"
+
     - name: Expose Argo CD server service
       ansible.builtin.command: >
         k3s kubectl patch svc {{ argocd_service_name }}
         -n {{ argocd_namespace }}
-        -p '{"spec":{"type":"{{ argocd_service_type }}"}}'
+        -p '{"spec":{"type":"{{ argocd_service_type }}","loadBalancerIP":"{{ argocd_loadbalancer_ip }}"}}'
       register: argocd_service_patch
       changed_when: "'patched' in argocd_service_patch.stdout"
+
+    - name: Restart Argo CD server after configuration changes
+      ansible.builtin.command: "k3s kubectl -n {{ argocd_namespace }} rollout restart deployment/{{ argocd_service_name }}"
+      register: argocd_server_restart
+      changed_when: "'restarted' in argocd_server_restart.stdout"
+
+    - name: Wait for Argo CD server restart
+      ansible.builtin.command: "k3s kubectl -n {{ argocd_namespace }} rollout status deployment/{{ argocd_service_name }} --timeout={{ argocd_wait_timeout }}"
+      register: argocd_server_rollout
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: argocd_server_rollout.rc == 0
 
     - name: Wait for Argo CD external IP
       ansible.builtin.shell: |
@@ -114,7 +145,7 @@
         msg:
           - "{{ argocd_pods.stdout_lines }}"
           - "{{ argocd_services.stdout_lines }}"
-          - "URL: https://{{ (argocd_external_ip.stdout | default('')) if argocd_external_ip is defined else '<service-ip>' }}"
-          - "Hostname: https://{{ argocd_hostname }}"
+          - "URL: {{ argocd_url_scheme }}://{{ (argocd_external_ip.stdout | default('')) if argocd_external_ip is defined else '<service-ip>' }}"
+          - "Hostname: {{ argocd_url_scheme }}://{{ argocd_hostname }}"
           - "Username: admin"
           - "Initial password: {{ argocd_initial_password.stdout if argocd_initial_password.rc == 0 else 'initial password secret was not found, it may have already been consumed or removed' }}"

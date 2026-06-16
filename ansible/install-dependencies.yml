@@ -64,7 +64,9 @@
           namespace: {{ metallb_namespace }}
         spec:
           addresses:
-          - {{ metallb_address_range }}
+        {% for address_range in metallb_address_ranges | default([metallb_address_range]) %}
+          - {{ address_range }}
+        {% endfor %}
         ---
         apiVersion: metallb.io/v1beta1
         kind: L2Advertisement
@@ -94,6 +96,7 @@
         helm upgrade --install {{ ingress_nginx_release_name }} {{ ingress_nginx_chart }}
         --namespace {{ ingress_nginx_namespace }}
         --create-namespace
+        --set controller.service.loadBalancerIP={{ ingress_nginx_loadbalancer_ip }}
       register: ingress_install
       changed_when: "'has been upgraded' in ingress_install.stdout or 'has been installed' in ingress_install.stdout"
 
@@ -162,6 +165,8 @@
         metadata:
           name: {{ dependency_demo_ingress_name }}
           namespace: {{ dependency_demo_namespace }}
+          annotations:
+            nginx.ingress.kubernetes.io/ssl-redirect: "false"
         spec:
           ingressClassName: nginx
           rules:
@@ -181,6 +186,19 @@
       when: dependency_demo_enabled | bool
       register: demo_ingress
       changed_when: "'created' in demo_ingress.stdout or 'configured' in demo_ingress.stdout"
+
+    - name: Remove legacy TLS configuration from demo NGINX ingress
+      ansible.builtin.command: >
+        k3s kubectl -n {{ dependency_demo_namespace }}
+        patch ingress {{ dependency_demo_ingress_name }}
+        --type=json
+        -p=[{"op":"remove","path":"/spec/tls"}]
+      when: dependency_demo_enabled | bool
+      register: demo_ingress_tls_remove
+      changed_when: demo_ingress_tls_remove.rc == 0
+      failed_when:
+        - demo_ingress_tls_remove.rc != 0
+        - "'missing path' not in demo_ingress_tls_remove.stderr"
 
     - name: Wait for demo NGINX deployment
       ansible.builtin.command: "k3s kubectl -n {{ dependency_demo_namespace }} rollout status deployment/{{ dependency_demo_deployment_name }} --timeout=180s"

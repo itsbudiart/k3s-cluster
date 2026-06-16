@@ -118,6 +118,20 @@ Shared variables:
 ansible/group_vars/all.yml
 ```
 
+## Project Documentation
+
+Full project documentation is available at:
+
+```text
+docs/project-documentation.md
+```
+
+Step-by-step installation tutorial:
+
+```text
+docs/tutorial-install-k3s-cluster.md
+```
+
 ## Access The Cluster
 
 After `install-k3s.yml` completes, use the generated kubeconfig:
@@ -139,14 +153,14 @@ k3s-worker-2   Ready   worker          192.168.56.35
 MetalLB is configured by `ansible/install-dependencies.yml` with this address range:
 
 ```text
-192.168.56.30-192.168.56.32
+192.168.56.65-192.168.56.94
 ```
 
 Example host entries:
 
 ```text
-192.168.56.30 nginx.superapps.lab
-192.168.56.31 argocd.superapps.lab
+192.168.56.65 nginx.superapps.lab
+192.168.56.66 argocd.superapps.lab
 ```
 
 Add them to your host `/etc/hosts` only after confirming the actual LoadBalancer IPs:

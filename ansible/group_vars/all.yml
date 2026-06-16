@@ -21,7 +21,9 @@ metallb_version: v0.15.2
 metallb_manifest_url: "https://raw.githubusercontent.com/metallb/metallb/{{ metallb_version }}/config/manifests/metallb-native.yaml"
 metallb_pool_name: homelab-pool
 metallb_l2_advertisement_name: homelab-l2
-metallb_address_range: 192.168.56.30-192.168.56.32
+metallb_address_range: 192.168.56.65-192.168.56.94
+metallb_address_ranges:
+  - 192.168.56.65-192.168.56.94
 
 ingress_nginx_namespace: ingress-nginx
 ingress_nginx_release_name: ingress-nginx
@@ -29,6 +31,7 @@ ingress_nginx_repo_name: ingress-nginx
 ingress_nginx_repo_url: https://kubernetes.github.io/ingress-nginx
 ingress_nginx_chart: ingress-nginx/ingress-nginx
 ingress_nginx_service_name: ingress-nginx-controller
+ingress_nginx_loadbalancer_ip: 192.168.56.65
 
 dependency_demo_enabled: true
 dependency_demo_namespace: apps
@@ -42,7 +45,10 @@ argocd_namespace: argocd
 argocd_manifest_url: https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 argocd_service_name: argocd-server
 argocd_service_type: LoadBalancer
+argocd_loadbalancer_ip: 192.168.56.66
+argocd_url_scheme: http
 argocd_hostname: argocd.superapps.lab
+argocd_server_insecure: true
 argocd_wait_timeout: 300s
 argocd_wait_for_external_ip: true
 argocd_install_cli: false

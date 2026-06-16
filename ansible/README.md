@@ -46,7 +46,7 @@ What `install-dependencies.yml` does:
 
 - installs Helm on the master node
 - installs MetalLB `v0.15.2`
-- configures the MetalLB address pool `192.168.56.30-192.168.56.32`
+- configures the MetalLB address pool `192.168.56.65-192.168.56.94`
 - installs NGINX Ingress Controller with Helm
 - waits for the NGINX Ingress external IP
 - optionally creates a demo NGINX app and ingress for `nginx.superapps.lab`
@@ -67,7 +67,7 @@ ansible-playbook install-dependencies.yml -e dependency_demo_enabled=false
 If you keep the demo app, add the printed ingress external IP to your host `/etc/hosts`, for example:
 
 ```text
-192.168.56.30 nginx.superapps.lab
+192.168.56.65 nginx.superapps.lab
 ```
 
 ## Install Argo CD
